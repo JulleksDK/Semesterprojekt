@@ -1,0 +1,586 @@
+"""
+Program til realtidsplotning af sensordata fra DHT22, LDR og MQ-135.
+Viser temperatur, lysintensitet, luftkvalitet og fugtighed med statistik.
+"""
+
+import os
+import sys
+import time
+from collections import deque
+from datetime import datetime, timedelta
+
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Button
+import matplotlib.patches as patches
+import pandas as pd
+import numpy as np
+
+
+# ========================= KONSTANTER =========================
+MAX_POINTS = 100  # Maksimalt antal datapunkter i 30-sekunders visning
+DELAY_SECONDS = 0.5  # Opdateringsinterval i sekunder
+DATA_FILE = "sensor_data.txt"  # Fil hvor sensordata gemmes
+FLAG_FILE = "plotting_active.txt"  # Flag-fil til at forhindre flere instanser
+
+# Sensor-indekser for lettere reference
+TEMP_INDEX = 0
+LIGHT_INDEX = 1
+GAS_INDEX = 2
+HUMIDITY_INDEX = 3
+
+
+# ========================= GLOBALE VARIABLE =========================
+# Datastrukturer til at gemme sensorværdier
+data_points = {
+    TEMP_INDEX: deque(maxlen=MAX_POINTS),      # Temperatur (°C)
+    LIGHT_INDEX: deque(maxlen=MAX_POINTS),     # Lysintensitet (0-4095)
+    GAS_INDEX: deque(maxlen=MAX_POINTS),       # Luftkvalitet (0-4095)
+    HUMIDITY_INDEX: deque(maxlen=MAX_POINTS)   # Fugtighed (%)
+}
+
+# Komplet historik for 1-times visning
+all_data_points = {
+    TEMP_INDEX: [],
+    LIGHT_INDEX: [],
+    GAS_INDEX: [],
+    HUMIDITY_INDEX: []
+}
+
+# Program-tilstand
+current_plot_index = 0
+start_time = time.time()
+time_range_mode = "30s"  # Kan være "30s" eller "1h"
+
+# GUI-elementer (initialiseres i setup_gui)
+fig = None
+ax_plot = None
+ax_prev = None
+ax_next = None
+ax_reset = None
+ax_range = None
+btn_prev = None
+btn_next = None
+btn_reset = None
+btn_range = None
+
+
+# ========================= HJÆLPEFUNKTIONER =========================
+def get_time_window():
+    """
+    Returnerer tidsvinduet baseret på valgt visningsmode.
+    
+    Returns:
+        tuple: (min_tid, max_tid) i sekunder
+    """
+    if time_range_mode == "30s":
+        return 0, 30
+    else:  # "1h"
+        return 0, 3600
+
+
+def filter_data_by_time(data_index):
+    """
+    Filtrerer data baseret på det valgte tidsvindue.
+    
+    For 30-sekunders mode vises kun de sidste 30 sekunder.
+    For 1-times mode vises alle data op til 1 time.
+    
+    Args:
+        data_index (int): Index for sensoren (0-3)
+        
+    Returns:
+        list: Liste af (tid, værdi) tupler
+    """
+    if time_range_mode == "30s":
+        # Beregn hvor meget tid der er gået siden start
+        current_time = time.time() - start_time
+        cutoff = max(0, current_time - 30)
+        
+        # Juster tidspunkter så de starter fra 0
+        return [(t - cutoff, v) for t, v in data_points[data_index] if t >= cutoff]
+    else:  # "1h"
+        # Vis alle data op til 1 time
+        return [(t, v) for t, v in all_data_points[data_index] if t <= 3600]
+
+
+def get_current_value(data_index):
+    """
+    Henter den seneste værdi for en given sensor.
+    
+    Args:
+        data_index (int): Index for sensoren (0-3)
+        
+    Returns:
+        float: Seneste værdi eller None hvis ingen data
+    """
+    if data_points[data_index]:
+        return data_points[data_index][-1][1]
+    return None
+
+
+def add_stats_box(ax, data_index, color='white'):
+    """
+    Tilføjer en statistikboks til plottet med min, max, gennemsnit og standardafvigelse.
+    
+    Args:
+        ax: Matplotlib axes objekt
+        data_index (int): Index for sensoren (0-3)
+        color (str): Baggrundsfarve for boksen
+    """
+    if not all_data_points[data_index]:
+        return
+        
+    # Udtræk værdierne fra data
+    _, values = zip(*all_data_points[data_index])
+    series = pd.Series(values)
+    
+    # Formatér statistik-tekst
+    stats_text = (
+        f'Min: {series.min():.1f}\n'
+        f'Max: {series.max():.1f}\n'
+        f'Gns: {series.mean():.1f}\n'
+        f'Std: {series.std():.1f}'
+    )
+    
+    # Tilføj tekstboks i nederste venstre hjørne
+    ax.text(0.02, 0.02, stats_text,
+            transform=ax.transAxes,
+            bbox=dict(boxstyle='round,pad=0.5', facecolor=color, alpha=0.8),
+            fontsize=9,
+            verticalalignment='bottom',
+            horizontalalignment='left',
+            family='monospace')
+
+
+# ========================= PLOT-FUNKTIONER =========================
+def plot_temperature():
+    """Plotter temperaturmålinger med statistik."""
+    ax_plot.set_title("Temperaturmåling", fontsize=14, pad=20)
+    ax_plot.set_xlabel("Tid (s)")
+    ax_plot.set_ylabel("Temperatur (°C)")
+    ax_plot.set_ylim(-10, 40)
+    
+    # Sæt x-akse område
+    min_time, max_time = get_time_window()
+    ax_plot.set_xlim(min_time, max_time)
+    
+    # Plot data hvis tilgængelig
+    filtered_data = filter_data_by_time(TEMP_INDEX)
+    if filtered_data:
+        x, y = zip(*filtered_data)
+        ax_plot.plot(x, y, 'r-', linewidth=2, label="Temperatur (°C)")
+        
+        # Vis aktuel værdi
+        current_val = get_current_value(TEMP_INDEX)
+        if current_val is not None:
+            ax_plot.text(0.98, 0.95, f'Aktuel: {current_val:.1f}°C', 
+                        transform=ax_plot.transAxes, 
+                        bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.8),
+                        fontsize=12, ha='right', va='top')
+        
+        ax_plot.legend(loc='upper left')
+    
+    # Tilføj statistik
+    add_stats_box(ax_plot, TEMP_INDEX, 'lightyellow')
+    ax_plot.grid(True, alpha=0.3)
+
+
+def plot_light():
+    """Plotter lysintensitetsmålinger med statistik."""
+    ax_plot.set_title("Lysmåling", fontsize=14, pad=20)
+    ax_plot.set_xlabel("Tid (s)")
+    ax_plot.set_ylabel("Lysintensitet")
+    ax_plot.set_ylim(0, 4095)
+    
+    # Sæt x-akse område
+    min_time, max_time = get_time_window()
+    ax_plot.set_xlim(min_time, max_time)
+    
+    # Plot data hvis tilgængelig
+    filtered_data = filter_data_by_time(LIGHT_INDEX)
+    if filtered_data:
+        x, y = zip(*filtered_data)
+        ax_plot.plot(x, y, 'g-', linewidth=2, label="Lysintensitet")
+        
+        # Vis aktuel værdi
+        current_val = get_current_value(LIGHT_INDEX)
+        if current_val is not None:
+            ax_plot.text(0.98, 0.95, f'Aktuel: {current_val:.0f}', 
+                        transform=ax_plot.transAxes, 
+                        bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgreen', alpha=0.8),
+                        fontsize=12, ha='right', va='top')
+        
+        ax_plot.legend(loc='upper left')
+    
+    # Tilføj statistik
+    add_stats_box(ax_plot, LIGHT_INDEX, 'palegreen')
+    ax_plot.grid(True, alpha=0.3)
+
+
+def plot_air_quality():
+    """Plotter luftkvalitetsmålinger med statistik."""
+    ax_plot.set_title("Luftkvalitet", fontsize=14, pad=20)
+    ax_plot.set_xlabel("Tid (s)")
+    ax_plot.set_ylabel("Gas (PPM)")
+    ax_plot.set_ylim(0, 4095)
+    
+    # Sæt x-akse område
+    min_time, max_time = get_time_window()
+    ax_plot.set_xlim(min_time, max_time)
+    
+    # Plot data hvis tilgængelig
+    filtered_data = filter_data_by_time(GAS_INDEX)
+    if filtered_data:
+        x, y = zip(*filtered_data)
+        ax_plot.plot(x, y, 'b-', linewidth=2, label="Gas (PPM)")
+        
+        # Vis aktuel værdi
+        current_val = get_current_value(GAS_INDEX)
+        if current_val is not None:
+            ax_plot.text(0.98, 0.95, f'Aktuel: {current_val:.0f} PPM', 
+                        transform=ax_plot.transAxes, 
+                        bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.8),
+                        fontsize=12, ha='right', va='top')
+        
+        ax_plot.legend(loc='upper left')
+    
+    # Tilføj statistik
+    add_stats_box(ax_plot, GAS_INDEX, 'lightcyan')
+    ax_plot.grid(True, alpha=0.3)
+
+
+def plot_humidity():
+    """Plotter fugtighedsmålinger med statistik."""
+    ax_plot.set_title("Fugtighedsmåling", fontsize=14, pad=20)
+    ax_plot.set_xlabel("Tid (s)")
+    ax_plot.set_ylabel("Fugtighed (%)")
+    ax_plot.set_ylim(0, 100)
+    
+    # Sæt x-akse område
+    min_time, max_time = get_time_window()
+    ax_plot.set_xlim(min_time, max_time)
+    
+    # Plot data hvis tilgængelig
+    filtered_data = filter_data_by_time(HUMIDITY_INDEX)
+    if filtered_data:
+        x, y = zip(*filtered_data)
+        ax_plot.plot(x, y, 'm-', linewidth=2, label="Fugtighed (%)")
+        
+        # Vis aktuel værdi
+        current_val = get_current_value(HUMIDITY_INDEX)
+        if current_val is not None:
+            ax_plot.text(0.98, 0.95, f'Aktuel: {current_val:.1f}%', 
+                        transform=ax_plot.transAxes, 
+                        bbox=dict(boxstyle='round,pad=0.5', facecolor='plum', alpha=0.8),
+                        fontsize=12, ha='right', va='top')
+        
+        ax_plot.legend(loc='upper left')
+    
+    # Tilføj statistik
+    add_stats_box(ax_plot, HUMIDITY_INDEX, 'lavender')
+    ax_plot.grid(True, alpha=0.3)
+
+
+# Liste over plot-funktioner og deres navne
+PLOT_FUNCTIONS = [plot_temperature, plot_light, plot_air_quality, plot_humidity]
+PLOT_NAMES = ["Temperatur", "Lys", "Luftkvalitet", "Fugtighed"]
+
+
+# ========================= GUI OPDATERINGSFUNKTIONER =========================
+def update_plot(redraw=True):
+    """
+    Opdaterer den aktuelle graf.
+    
+    Args:
+        redraw (bool): Om grafen skal gentegnes
+    """
+    ax_plot.clear()
+    PLOT_FUNCTIONS[current_plot_index]()
+    
+    # Opdater titel med aktuel graf-information
+    update_indicator()
+    
+    if redraw:
+        # Brug draw_idle for at undgå at stjæle fokus
+        fig.canvas.draw_idle()
+        fig.canvas.flush_events()
+
+
+def update_indicator():
+    #Opdaterer teksten der viser hvilken graf der vises.
+    indicator_text = f"Graf {current_plot_index + 1} af {len(PLOT_FUNCTIONS)}: {PLOT_NAMES[current_plot_index]}"
+    fig.suptitle(indicator_text, fontsize=12, y=0.98)
+
+
+# ========================= EVENT HANDLERS =========================
+def on_key_press(event):
+    """
+    Håndterer tastatur-input.
+    Piletaster: Skift mellem grafer
+    R: Nulstil data
+    Q: Afslut program
+    """
+    
+    global current_plot_index
+    
+    if event.key == 'right':
+        next_plot(None)
+    elif event.key == 'left':
+        prev_plot(None)
+    elif event.key == 'r':
+        reset_data(None)
+    elif event.key == 'q':
+        plt.close('all')
+        sys.exit(0)
+
+
+def prev_plot(event):
+    """Skifter til forrige graf."""
+    global current_plot_index
+    current_plot_index = (current_plot_index - 1) % len(PLOT_FUNCTIONS)
+    update_plot()
+
+
+def next_plot(event):
+    """Skifter til næste graf."""
+    global current_plot_index
+    current_plot_index = (current_plot_index + 1) % len(PLOT_FUNCTIONS)
+    update_plot()
+
+
+def toggle_time_range(event):
+    """Skifter mellem 30-sekunders og 1-times visning."""
+    global time_range_mode
+    
+    if time_range_mode == "30s":
+        time_range_mode = "1h"
+        btn_range.label.set_text("📊 1 Time")
+    else:
+        time_range_mode = "30s"
+        btn_range.label.set_text("📊 30 Sek")
+    
+    update_plot()
+
+
+def reset_data(event):
+    """Nulstiller alle sensordata og starter forfra."""
+    global start_time
+    
+    # Ryd alle data
+    for key in data_points:
+        data_points[key].clear()
+    for key in all_data_points:
+        all_data_points[key].clear()
+    
+    # Nulstil starttid
+    start_time = time.time()
+    update_plot()
+    print("Data nulstillet!")
+
+
+# ========================= DATA HÅNDTERING =========================
+def read_sensor_data(file_path):
+    """
+    Læser og parser sensordata fra fil.
+    
+    Forventer format: temperatur,lys,gas,fugtighed
+    Eksempel: 22.5,2048,350,65.2
+    
+    Args:
+        file_path (str): Sti til datafilen
+        
+    Returns:
+        tuple: (temperatur, lys, gas, fugtighed) eller (None, None, None, None) ved fejl
+    """
+    try:
+        with open(file_path, "r") as file:
+            raw_data = file.read().strip()
+            if not raw_data:
+                return None, None, None, None
+                
+            values = raw_data.split(',')
+            if len(values) >= 3:
+                temp = float(values[0])
+                light = float(values[1])
+                air_quality = float(values[2])
+                # Håndter bagudkompatibilitet - brug standard fugtighed hvis ikke tilgængelig
+                humidity = float(values[3]) if len(values) >= 4 else 50.0
+                return temp, light, air_quality, humidity
+                
+    except (IOError, ValueError) as e:
+        print(f"Fejl ved læsning af sensordata: {e}")
+    
+    return None, None, None, None
+
+
+def append_sensor_data(temp, light, air_quality, humidity):
+    """
+    Tilføjer nye sensordata til datastrukturen.
+    
+    Gemmer data både til 30-sekunders visning og 1-times historik.
+    Fjerner automatisk data ældre end 1 time.
+    
+    Args:
+        temp (float): Temperatur i celsius
+        light (float): Lysintensitet (0-4095)
+        air_quality (float): Luftkvalitet (0-4095)
+        humidity (float): Fugtighed i procent
+    """
+    current_time = time.time() - start_time
+    
+    # Tilføj til 30-sekunders visning (deque håndterer automatisk max størrelse)
+    data_points[TEMP_INDEX].append((current_time, temp))
+    data_points[LIGHT_INDEX].append((current_time, light))
+    data_points[GAS_INDEX].append((current_time, air_quality))
+    data_points[HUMIDITY_INDEX].append((current_time, humidity))
+    
+    # Tilføj til komplet historik
+    all_data_points[TEMP_INDEX].append((current_time, temp))
+    all_data_points[LIGHT_INDEX].append((current_time, light))
+    all_data_points[GAS_INDEX].append((current_time, air_quality))
+    all_data_points[HUMIDITY_INDEX].append((current_time, humidity))
+    
+    # Fjern data ældre end 1 time for at spare hukommelse
+    cutoff_time = current_time - 3600
+    for key in all_data_points:
+        all_data_points[key] = [(t, v) for t, v in all_data_points[key] if t > cutoff_time]
+
+
+# ========================= GUI OPSÆTNING =========================
+def setup_gui():
+    """
+    Opretter og konfigurerer hele brugergrænsefladen.
+    
+    Inkluderer hovedplot og fire kontrolknapper:
+    - Forrige/Næste: Navigation mellem grafer
+    - Reset: Nulstil alle data
+    - Tidsvindue: Skift mellem 30s og 1h visning
+    """
+    global fig, ax_plot, ax_prev, ax_next, ax_reset, ax_range
+    global btn_prev, btn_next, btn_reset, btn_range
+    
+    # Opret hovedvindue
+    fig = plt.figure(figsize=(12, 7))
+    fig.canvas.manager.set_window_title("Sensor Data Plotter")
+    
+    # Definer layout med grid
+    # Hovedplot tager det meste af pladsen
+    ax_plot = plt.subplot2grid((10, 10), (1, 0), colspan=10, rowspan=8)
+    
+    # Knapper placeres i bunden
+    ax_prev = plt.subplot2grid((10, 10), (9, 1), colspan=2, rowspan=1)
+    ax_next = plt.subplot2grid((10, 10), (9, 7), colspan=2, rowspan=1)
+    ax_reset = plt.subplot2grid((10, 10), (9, 3), colspan=2, rowspan=1)
+    ax_range = plt.subplot2grid((10, 10), (9, 5), colspan=2, rowspan=1)
+    
+    # Opret knapper med passende farver
+    btn_prev = Button(ax_prev, '◄ Forrige', color='lightblue', hovercolor='skyblue')
+    btn_next = Button(ax_next, 'Næste ►', color='lightblue', hovercolor='skyblue')
+    btn_reset = Button(ax_reset, '↻ Reset', color='lightcoral', hovercolor='salmon')
+    btn_range = Button(ax_range, '📊 30 Sek', color='lightgreen', hovercolor='palegreen')
+    
+    # Tilknyt event handlers
+    btn_prev.on_clicked(prev_plot)
+    btn_next.on_clicked(next_plot)
+    btn_reset.on_clicked(reset_data)
+    btn_range.on_clicked(toggle_time_range)
+    
+    # Tilknyt keyboard handler
+    fig.canvas.mpl_connect('key_press_event', on_key_press)
+    
+    # Juster layout for optimal visning
+    plt.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.15, hspace=0.5)
+
+
+# ========================= HOVEDPROGRAM =========================
+def main():
+    """
+    Hovedfunktion der starter programmet.
+    
+    Håndterer:
+    - Oprettelse af datafil hvis den ikke eksisterer
+    - Forhindring af flere samtidige instanser
+    - Opsætning af GUI
+    - Hovedloop for dataopdatering
+    """
+    # Vis velkomstbesked
+    print("\nNode-RED Realtidsplot")
+    print("=" * 25)
+    print("Navigation:")
+    print("  • Klik på pilene eller brug venstre/højre piletaster")
+    print("  • Klik på Reset eller tryk 'R' for at nulstille data")
+    print("  • Tryk 'Q' for at afslutte")
+    print("\n")
+
+    # Opret datafil hvis den ikke eksisterer
+    if not os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "w") as f:
+            pass
+
+    # Check om en anden instans allerede kører
+    if os.path.exists(FLAG_FILE):
+        # Hvis der er kommandolinje-argumenter, send dem til den eksisterende instans
+        if len(sys.argv) > 1:
+            with open(DATA_FILE, "w") as f:
+                f.write(sys.argv[1])
+            print("Data sendt til eksisterende plotvindue.")
+            return
+    else:
+        # Opret flag-fil med process ID
+        with open(FLAG_FILE, "w") as f:
+            f.write(str(os.getpid()))
+
+    try:
+        # Opsæt GUI
+        setup_gui()
+        update_plot()
+        
+        # Start i interaktiv tilstand for at undgå at stjæle fokus
+        plt.ion()
+        plt.show(block=False)
+        
+        # Initialiser tidsstempler
+        last_modified = os.path.getmtime(DATA_FILE) if os.path.exists(DATA_FILE) else 0
+        last_update_time = time.time()
+        
+        # Hovedloop
+        while plt.fignum_exists(fig.number):
+            try:
+                # Check om datafilen er blevet opdateret
+                if os.path.exists(DATA_FILE):
+                    current_modified = os.path.getmtime(DATA_FILE)
+                    
+                    if current_modified > last_modified:
+                        # Læs nye data
+                        temp, light, air_quality, humidity = read_sensor_data(DATA_FILE)
+                        
+                        if temp is not None:
+                            # Gem data
+                            append_sensor_data(temp, light, air_quality, humidity)
+                            
+                            # Opdater plot med passende interval
+                            current_time = time.time()
+                            if current_time - last_update_time >= DELAY_SECONDS:
+                                update_plot()
+                                last_update_time = current_time
+                                
+                        last_modified = current_modified
+                
+                # Hold event loop kørende
+                plt.pause(0.1)
+                
+            except Exception as e:
+                print(f"Fejl i hovedloop: {e}")
+                
+    except Exception as e:
+        print(f"Fatal fejl: {e}")
+    finally:
+        # Ryd op
+        if os.path.exists(FLAG_FILE):
+            os.remove(FLAG_FILE)
+        plt.close('all')
+
+
+# Start programmet hvis det køres direkte
+if __name__ == "__main__":
+    main()
