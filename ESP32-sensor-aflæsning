@@ -1,0 +1,73 @@
+#Import af libraries, modul til aflæsning af sensorer: DHT22, LDR og MQ-135.
+import time
+from machine import Pin, ADC
+import dht
+
+# Konstant for delay mellem målinger
+DELAY_SECONDS = 2
+
+# === Initialisering af sensorer ===
+DHT_PIN = 13
+LDR_PIN = 32
+MQ135_PIN = 27
+
+dht_sensor = dht.DHT22(Pin(DHT_PIN))
+
+ldr_sensor = ADC(Pin(LDR_PIN))
+ldr_sensor.atten(ADC.ATTN_11DB)
+
+mq135_sensor = ADC(Pin(MQ135_PIN))
+mq135_sensor.atten(ADC.ATTN_11DB)
+
+def read_dht_sensor(sensor):
+    """
+    Aflæser temperatur og fugtighed fra DHT22-sensoren.
+    Returnerer (temperatur, fugtighed) eller (0, 0) ved fejl.
+    """
+    try:
+        sensor.measure()
+        temperature = sensor.temperature()
+        humidity = sensor.humidity()
+        
+        # Returner begge værdier, eller 0 hvis None
+        temp_value = temperature if temperature is not None else 0
+        hum_value = humidity if humidity is not None else 0
+        
+        return temp_value, hum_value
+    except OSError as error:
+        print("Fejl ved DHT-sensor:", error)
+        return 0, 0
+
+def read_adc_sensor(sensor, max_value=4095):
+    """
+    Aflæser værdi fra en ADC-sensor.
+    Returnerer den aflæste værdi eller 0 ved fejl.
+    """
+    try:
+        value = sensor.read()
+        return max_value - value if value is not None else 0
+    except Exception as error:
+        print(f"Fejl ved ADC-sensor ({sensor}):", error)
+        return 0
+
+def main_loop():
+    #Hovedloop, der aflæser sensorerne og printer deres værdier.
+    
+    while True:
+        try:
+            # Aflæs sensorer
+            temperature, humidity = read_dht_sensor(dht_sensor)
+            ldr_value = read_adc_sensor(ldr_sensor)
+            mq135_value = read_adc_sensor(mq135_sensor, max_value=4095)
+
+            # Print aflæsninger (temperatur, lys, gas, fugtighed)
+            values_str = f"{temperature},{ldr_value},{mq135_value},{humidity}"
+            print(values_str)
+        except Exception as error:
+            print("Uventet fejl:", error)
+
+        # Vent et fastsat antal sekunder
+        time.sleep(DELAY_SECONDS)
+
+if __name__ == "__main__":
+    main_loop()
