@@ -1,0 +1,11 @@
+// Ensure we have data in payload
+var rawData = msg.payload.trim();
+
+if (!rawData || rawData.length === 0) {
+    node.warn("Empty data received");
+    return null; // Stop flow if no valid data
+}
+
+// Simply pass the raw data directly to the Python script
+// No JSON formatting needed
+return msg;
