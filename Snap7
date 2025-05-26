@@ -1,0 +1,179 @@
+"""
+PLC-kommunikation via Snap7 for sensordata.
+Sender temperatur, lys, gas og fugtighedsdata til Siemens PLC Data Block.
+"""
+
+import sys
+import logging
+from typing import Tuple, Optional
+
+import snap7
+from snap7.util import set_real
+
+
+# ========================= KONSTANTER =========================
+# PLC forbindelsesindstillinger
+PLC_IP = '192.168.0.1'  # Skal ændres til din PLC's IP-adresse
+RACK = 0
+SLOT = 1
+
+# Data Block konfiguration
+DB_NUMBER = 1  # Skift til det korrekte DB-nummer i din PLC
+DB_SIZE = 16  # 4 REAL værdier * 4 bytes hver
+
+# Offsets for sensorværdier i Data Block (DB)
+TEMP_DB_OFFSET = 0      # DBD0
+LDR_DB_OFFSET = 4       # DBD4
+GAS_DB_OFFSET = 8       # DBD8
+HUMIDITY_DB_OFFSET = 12  # DBD12
+
+# Logging konfiguration
+LOG_FILE = 'plc_communication.log'
+LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
+
+
+# ========================= LOGGING OPSÆTNING =========================
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format=LOG_FORMAT
+)
+
+
+# ========================= HOVEDFUNKTIONER =========================
+def write_to_plc(temp: float, ldr: float, gas: float, humid: float) -> bool:
+    """
+    Skriver sensordata til PLC's Data Block.
+    
+    Args:
+        temp: Temperatur i celsius
+        ldr: Lysintensitet (0-4095)
+        gas: Gassensor værdi (0-4095)
+        humid: Fugtighed i procent
+        
+    Returns:
+        bool: True hvis data blev skrevet succesfuldt
+    """
+    client = None
+    
+    try:
+        # Opret forbindelse til PLC
+        client = snap7.client.Client()
+        client.connect(PLC_IP, RACK, SLOT)
+        
+        if not client.get_connected():
+            logging.error("Kunne ikke oprette forbindelse til PLC")
+            print(f"Fejl: Kunne ikke forbinde til PLC på {PLC_IP}")
+            return False
+            
+        logging.info("Forbundet til PLC succesfuldt")
+        
+        # Læs eksisterende data fra DB
+        db_data = client.db_read(DB_NUMBER, 0, DB_SIZE)
+        logging.info(f"Læste DB{DB_NUMBER} succesfuldt")
+        
+        # Opdater værdier i bufferen
+        set_real(db_data, TEMP_DB_OFFSET, temp)
+        set_real(db_data, LDR_DB_OFFSET, ldr)
+        set_real(db_data, GAS_DB_OFFSET, gas)
+        set_real(db_data, HUMIDITY_DB_OFFSET, humid)
+        
+        # Skriv opdateret data tilbage til PLC
+        client.db_write(DB_NUMBER, 0, db_data)
+        
+        logging.info(
+            f"Data skrevet til DB{DB_NUMBER}: "
+            f"temp={temp:.1f}, ldr={ldr:.0f}, gas={gas:.0f}, humid={humid:.1f}"
+        )
+        print(f"Succesfuldt skrevet til PLC: {temp:.1f}°C, {ldr:.0f}, {gas:.0f}, {humid:.1f}%")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Fejl ved PLC-kommunikation: {str(e)}")
+        print(f"Fejl ved skrivning til PLC: {str(e)}")
+        return False
+        
+    finally:
+        # Sørg for at lukke forbindelsen
+        if client and client.get_connected():
+            client.disconnect()
+            logging.info("Afbrudt forbindelse til PLC")
+
+
+def parse_sensor_data(raw_data: str) -> Optional[Tuple[float, float, float, float]]:
+    """
+    Parser rå sensordata streng til individuelle værdier.
+    
+    Args:
+        raw_data: Kommasepareret streng med format "temp,ldr,gas,humid"
+        
+    Returns:
+        Tuple med (temp, ldr, gas, humid) eller None ved fejl
+    """
+    try:
+        values = raw_data.strip().split(',')
+        
+        if len(values) != 4:
+            logging.error(f"Ugyldigt dataformat: {raw_data}")
+            print(f"Fejl: Forventede 4 værdier, modtog {len(values)}")
+            return None
+            
+        # Konverter til float værdier
+        temp = float(values[0])
+        ldr = float(values[1])
+        gas = float(values[2])
+        humid = float(values[3])
+        
+        # Valider værdiområder
+        if not (-50 <= temp <= 150):
+            logging.warning(f"Temperatur uden for område: {temp}")
+        if not (0 <= ldr <= 4095):
+            logging.warning(f"Lysværdi uden for område: {ldr}")
+        if not (0 <= gas <= 4095):
+            logging.warning(f"Gasværdi uden for område: {gas}")
+        if not (0 <= humid <= 100):
+            logging.warning(f"Fugtighed uden for område: {humid}")
+            
+        return temp, ldr, gas, humid
+        
+    except ValueError as e:
+        logging.error(f"Fejl ved konvertering af data: {str(e)}")
+        print(f"Fejl: Kunne ikke konvertere data til tal")
+        return None
+
+
+# ========================= HOVEDPROGRAM =========================
+def main():
+    """
+    Hovedfunktion der læser sensordata fra kommandolinjen og sender til PLC.
+    
+    Forventer data som første argument i format: "temp,ldr,gas,humid"
+    Eksempel: python plc_communication.py "22.5,2048,350,65.2"
+    """
+    # Check om der er input fra Node-RED
+    if len(sys.argv) < 2:
+        logging.warning("Ingen inputdata modtaget")
+        print("Fejl: Ingen sensordata modtaget")
+        print("Brug: python plc_communication.py 'temp,ldr,gas,humid'")
+        sys.exit(1)
+    
+    # Hent og parse sensordata
+    raw_data = sys.argv[1]
+    sensor_values = parse_sensor_data(raw_data)
+    
+    if sensor_values is None:
+        print("Fejl: Kunne ikke parse sensordata")
+        sys.exit(1)
+    
+    # Udtræk individuelle værdier
+    temp, ldr, gas, humid = sensor_values
+    
+    # Send data til PLC
+    success = write_to_plc(temp, ldr, gas, humid)
+    
+    # Exit med passende kode
+    sys.exit(0 if success else 1)
+
+
+if __name__ == "__main__":
+    main()
