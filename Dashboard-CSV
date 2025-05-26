@@ -1,0 +1,31 @@
+// Split payload and convert values to numbers
+const [temperature, ldr_value, mq135_value, humidity ] = msg.payload.split(',').map(val => val.trim());
+const temperatureValue = parseFloat(temperature);
+const ldrValue = parseFloat(ldr_value);
+const mq135Value = parseInt(mq135_value, 10);
+const humidityValue = parseFloat(humidity);
+
+const now = new Date();
+
+const timestamp = now.toLocaleString('da-DK');
+
+// Create CSV line
+const csvLine = `${timestamp},${temperatureValue},${ldrValue},${mq135Value},${humidity}\n`;
+
+// Output 1: CSV line for file
+const fullOutput = { payload: csvLine };
+
+// Output 2: Temperature only for dashboard
+const temperatureOnlyOutput = { payload: temperatureValue };
+
+// Output 3: Gas only for dashboard
+const gasOnlyOutput = { payload: mq135Value };
+
+// Output 4: Temperature only for dashboard
+const lightOnlyOutput = { payload: ldrValue };
+
+// Output 5: Humidity only for dashboard
+const humidityOnlyOutput = { payload: humidityValue };
+
+// Return both outputs as array
+return [fullOutput, temperatureOnlyOutput, gasOnlyOutput, lightOnlyOutput, humidityOnlyOutput];
